@@ -77,7 +77,9 @@ KEYS_WARNING = (
     "PRIVATE KEY MAP — never upload or share this file. It is the only thing "
     "that can turn the redacted tokens back into your real names, strings and "
     "comments. Keep it with your source code, under your normal source-code "
-    "controls. If you lose it, redacted results cannot be restored."
+    "controls. If you lose it, re-running this same tool version on the "
+    "unchanged original source regenerates the identical keys; without "
+    "either, redacted results cannot be restored."
 )
 
 # Zig language core: keywords, primitive types, public std-library vocabulary.

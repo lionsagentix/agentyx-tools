@@ -77,8 +77,16 @@ IF DN_2 = STR_1
 
 `agentyx.keys.json` contains the full token→original map plus metadata
 (`format: agentyx-keys/1`). Treat it like source code: keep it under your normal
-source-code controls, and **never upload or share it**. If you lose it,
-redacted results cannot be restored.
+source-code controls, and **never upload or share it**.
+
+Redaction is **deterministic**: the same tool version run on the byte-identical
+source tree always produces the same tokens and the same keys file (the test
+suite enforces this). So a lost keys file is recoverable — re-run `redact` on
+the unchanged original source and the regenerated keys restore any previously
+returned results. If the source has changed (or the tool version differs),
+token numbering shifts and old results cannot be restored — which is why
+keeping the keys file under version control next to the source is still the
+right habit.
 
 ## Honest limits — read before relying on this
 
