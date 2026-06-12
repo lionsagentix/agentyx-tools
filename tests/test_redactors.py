@@ -106,6 +106,66 @@ class ZigCore(unittest.TestCase):
         self.assertIn("[_]", self.red)
 
 
+class RustResultRehydration(unittest.TestCase):
+    """--target rust: token restore + the emitter's name-dependent transforms
+    (snake_case, r# keyword escape, allow-attr drop, escape lowering)."""
+
+    def test_camel_value_names_become_snake(self):
+        rev = {"ID_1": "caseFold", "ID_2": "cp"}
+        rs = "pub fn ID_1(ID_2: u32) -> u32 { ID_2 }"
+        self.assertEqual(zig.rehydrate_rust_text(rs, rev),
+                         "pub fn case_fold(cp: u32) -> u32 { cp }")
+
+    def test_pascal_type_names_untouched(self):
+        rev = {"ID_1": "FoldInfo"}
+        self.assertEqual(zig.rehydrate_rust_text("struct ID_1;", rev),
+                         "struct FoldInfo;")
+
+    def test_rust_keyword_collision_gets_raw_escape(self):
+        rev = {"ID_1": "match"}
+        self.assertEqual(zig.rehydrate_rust_text("pub fn ID_1() {}", rev),
+                         "pub fn r#match() {}")
+
+    def test_spurious_non_snake_case_allow_dropped(self):
+        rev = {"ID_1": "lookup"}
+        rs = "#[allow(non_snake_case)]\nfn ID_1() {}"
+        self.assertEqual(zig.rehydrate_rust_text(rs, rev), "fn lookup() {}")
+
+    def test_needed_non_snake_case_allow_kept(self):
+        rev = {"ID_1": "doThing_X"}   # not a camel VALUE name -> kept verbatim
+        rs = "#[allow(non_snake_case)]\nfn ID_1() {}"
+        self.assertIn("#[allow(non_snake_case)]",
+                      zig.rehydrate_rust_text(rs, rev))
+
+    def test_string_restored_with_escape_lowering(self):
+        rev = {"STR_1": '"caf\\xc3\\xa9"'}
+        out = zig.rehydrate_rust_text('let s = "STR_1";', rev)
+        self.assertEqual(out, 'let s = "caf\\u{e9}";')
+
+    def test_cli_target_rust(self):
+        work = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(work, "results"))
+            with open(os.path.join(work, "results", "out.rs"), "w") as f:
+                f.write("pub fn ID_1(ID_2: u32) -> u32 { ID_2 }")
+            keys = os.path.join(work, "k.json")
+            with open(keys, "w") as f:
+                json.dump({"format": "agentyx-keys/1",
+                           "map": {"ID_1": "caseFold", "ID_2": "cp"}}, f)
+            r = subprocess.run(
+                [sys.executable, os.path.join(ROOT, "agentyx_redact_zig.py"),
+                 "rehydrate", "--in", os.path.join(work, "results"),
+                 "--out", os.path.join(work, "final"),
+                 "--keys", keys, "--target", "rust"],
+                capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(os.path.join(work, "final", "out.rs")) as f:
+                self.assertEqual(f.read(),
+                                 "pub fn case_fold(cp: u32) -> u32 { cp }")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 class KeyRecoveryByRerun(unittest.TestCase):
     """Lost keys are recoverable: same source + same tool version => the SAME
     keys file. The regenerated keys must restore artifacts redacted earlier."""

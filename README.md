@@ -58,6 +58,23 @@ python3 agentyx_redact_cobol.py rehydrate \
 The whole tree shares one keys map, so the same name becomes the same token in
 every file and copybook — conversion needs that consistency.
 
+### Restoring conversion results (Zig → Rust)
+
+Results returned by the Agentyx Zig → Rust service (converted `.rs`, generated
+tests, API docs) are still in tokens. Restore the whole results folder with one
+command — use `--target rust` so the tool also mirrors the converter's
+deterministic naming rules (camelCase → snake_case, `r#` keyword escapes)
+instead of pasting raw Zig names into Rust:
+
+```bash
+python3 agentyx_redact_zig.py rehydrate \
+    --in ./results --out ./final --keys ./math.zig.agentyx.keys.json --target rust
+```
+
+This is a faithful inverse: restoring the redacted results equals converting
+your real code directly, byte for byte (matched against Agentyx Zig→Rust
+emitter v1.10.x; the test suite covers the transforms).
+
 ### Example — what crosses the wire
 
 Your code:

@@ -181,6 +181,93 @@ def rehydrate_text(text, rev):
                   lambda m: rev.get(m.group(0), m.group(0)), text)
 
 
+# ───────────── result rehydration for EMITTED RUST (--target rust) ─────────────
+# The Agentyx Zig→Rust emitter (v1.10.x) applies deterministic NAME-DEPENDENT
+# transforms while generating Rust. Restoring tokens verbatim would skip them,
+# so this faithful inverse restores each token AND re-applies the transform the
+# emitter would have applied to the real name:
+#   - camelCase VALUE names -> snake_case (types/PascalCase untouched)
+#   - Rust-keyword collisions -> r#keyword escape
+#   - Zig \xNN escape runs -> \u{..} normalization inside restored strings
+#   - a `#[allow(non_snake_case)]` emitted for a tokenized name is dropped when
+#     the restored name needs no exemption
+# Result: rehydrate_rust(emit(redact(x))) == emit(x), byte for byte.
+
+_RUST_KEYWORDS = frozenset((
+    "as", "break", "const", "continue", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
+    "move", "mut", "pub", "ref", "return", "static", "struct", "trait",
+    "true", "type", "unsafe", "use", "where", "while", "async", "await",
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv",
+    "typeof", "unsized", "virtual", "yield", "try", "gen",
+))
+
+
+def _to_snake(name):
+    t = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    t = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", t)
+    return t.lower()
+
+
+def _is_camel_value(name):
+    return bool(re.fullmatch(r"[a-z][A-Za-z0-9]*", name or "")) and any(
+        c.isupper() for c in name)
+
+
+def _lower_zig_str_escapes(s):
+    def _repl(m):
+        run = m.group(0)
+        bs = bytes(int(h, 16) for h in re.findall(r"\\x([0-9A-Fa-f]{2})", run))
+        if all(b <= 0x7F for b in bs):
+            return run
+        return "".join("\\u{%x}" % ord(c) for c in bs.decode("utf-8", "replace"))
+    return re.sub(r"(?:\\x[0-9A-Fa-f]{2})+", _repl, s)
+
+
+def rehydrate_rust_text(text, rev):
+    """Faithful inverse for Rust (and docs) EMITTED by Agentyx from redacted
+    Zig — token restore + the emitter's name-dependent transforms."""
+    # strings: restore original content, apply the emitter's escape lowering
+    def _str(m):
+        full = rev.get(m.group(1))
+        if full is None:
+            return m.group(0)
+        inner = full[1:-1] if len(full) >= 2 and full[0] in "\"'" else full
+        return '"' + _lower_zig_str_escapes(inner) + '"'
+    text = re.sub(r'"(STR_\d+)"', _str, text)
+    # bare STR token (string used unquoted, e.g. a generic-type position)
+    text = re.sub(r"\bSTR_\d+\b",
+                  lambda m: rev[m.group(0)][1:-1] if m.group(0) in rev
+                  and len(rev[m.group(0)]) >= 2 else m.group(0), text)
+    text = re.sub(r"MLS_\d+", lambda m: rev.get(m.group(0), m.group(0)), text)
+    text = re.sub(r"\bCMT_\d+\b", lambda m: rev.get(m.group(0), m.group(0)), text)
+
+    # identifiers: restore, mirror snake_case normalization, r#-escape keywords
+    def _restore_id(m):
+        real = rev.get(m.group(0), m.group(0))
+        if _is_camel_value(real):
+            real = _to_snake(real)
+        return ("r#" + real) if real in _RUST_KEYWORDS else real
+    text = re.sub(r"ID_\d+", _restore_id, text)
+    # the emitter case-folds some tokens (test names) — mirror to lowercase
+    text = re.sub(r"(?<![A-Za-z])id_(\d+)",
+                  lambda m: rev.get("ID_" + m.group(1), m.group(0)).lower()
+                  if "ID_" + m.group(1) in rev else m.group(0), text)
+
+    # drop a `#[allow(non_snake_case)]` whose (now-real) decl name needs none
+    decl = re.compile(r"\b(?:fn|struct|impl|enum|union|type)\s+([A-Za-z_]\w*)")
+    lines, out = text.split("\n"), []
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("#[allow(") and "non_snake_case" in s \
+                and not s.startswith("#!"):
+            m = decl.search(lines[i + 1] if i + 1 < len(lines) else "")
+            if m and not any(c.isupper() for c in m.group(1)):
+                continue
+        out.append(ln)
+    return "\n".join(out)
+
+
 def leak_check(redacted, rev):
     """Confirm no redacted identifier/string/comment still appears.
 
@@ -339,18 +426,26 @@ def cmd_verify(args):
 
 def cmd_rehydrate(args):
     rev = _load_keys(args.keys)
+    target = getattr(args, "target", "source")
+    restore = rehydrate_rust_text if target == "rust" else rehydrate_text
     files = ([args.input] if os.path.isfile(args.input)
              else [os.path.join(r, fn)
                    for r, _, fs in os.walk(args.input) for fn in sorted(fs)])
     n = 0
     for src in files:
         text, _ = _read(src)
-        restored = rehydrate_text(text, rev)
+        # within a mixed results folder, .zig sources restore generically even
+        # under --target rust; emitted .rs/.md get the emitter-aware inverse
+        this_restore = (rehydrate_text
+                        if src.lower().endswith(".zig") else restore)
+        restored = this_restore(text, rev)
         with open(_out_path(args.input, src, args.out), "w",
                   encoding="utf-8") as f:
             f.write(restored)
         n += 1
-    print(f"rehydrated {n} file(s) -> {args.out}")
+    mode_note = (" (Rust-aware: emitter name transforms mirrored)"
+                 if target == "rust" else "")
+    print(f"rehydrated {n} file(s) -> {args.out}{mode_note}")
 
 
 def main(argv=None):
@@ -384,6 +479,11 @@ def main(argv=None):
     p.add_argument("--in", dest="input", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--keys", required=True)
+    p.add_argument("--target", choices=("source", "rust"), default="source",
+                   help="'rust' for results returned by the Agentyx Zig→Rust "
+                        "service (.rs/.md): restores tokens AND mirrors the "
+                        "emitter's name transforms (snake_case, r# escapes). "
+                        "'source' (default) for plain token restore.")
     p.set_defaults(fn=cmd_rehydrate)
 
     args = ap.parse_args(argv)
