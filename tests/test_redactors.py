@@ -106,6 +106,41 @@ class ZigCore(unittest.TestCase):
         self.assertIn("[_]", self.red)
 
 
+class KeyRecoveryByRerun(unittest.TestCase):
+    """Lost keys are recoverable: same source + same tool version => the SAME
+    keys file. The regenerated keys must restore artifacts redacted earlier."""
+
+    def _check(self, mod, fixture):
+        with open(os.path.join(FIXTURES, fixture)) as f:
+            src = f.read()
+        s1, s2 = mod.new_state(), mod.new_state()
+        red1 = mod.redact_text(src, s1)
+        red2 = mod.redact_text(src, s2)
+        self.assertEqual(red1, red2)                  # identical redaction
+        self.assertEqual(s1[1], s2[1])                # identical keys map
+        # keys from the SECOND run restore the FIRST run's output
+        self.assertEqual(mod.rehydrate_text(red1, s2[1]), src)
+
+    def test_cobol_rerun_recovers_keys(self):
+        self._check(cob, "sample.cbl")
+
+    def test_zig_rerun_recovers_keys(self):
+        self._check(zig, "sample.zig")
+
+    def test_tree_walk_is_sorted_dirs_and_files(self):
+        """Multi-dir trees must enumerate identically on any filesystem."""
+        work = tempfile.mkdtemp()
+        try:
+            for d in ("b_dir", "a_dir"):
+                os.makedirs(os.path.join(work, d))
+                shutil.copy(os.path.join(FIXTURES, "sample.cbl"),
+                            os.path.join(work, d, "p.cbl"))
+            files = cob._collect(work, (".cbl",))
+            self.assertEqual(files, sorted(files))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 class CliEndToEnd(unittest.TestCase):
     """Drive each tool's CLI exactly as a customer would."""
 

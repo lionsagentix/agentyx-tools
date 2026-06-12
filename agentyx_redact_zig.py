@@ -207,7 +207,10 @@ def _collect(path, exts):
     if os.path.isfile(path):
         return [path]
     found = []
-    for r, _, files in os.walk(path):
+    # deterministic traversal (dirs AND files sorted): redacting the same tree
+    # twice yields the SAME tokens — a lost keys file is recoverable by re-run.
+    for r, dirs, files in os.walk(path):
+        dirs.sort()
         for fn in sorted(files):
             if fn.lower().endswith(exts):
                 found.append(os.path.join(r, fn))
